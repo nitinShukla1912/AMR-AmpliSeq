@@ -1,58 +1,70 @@
-package main
+#!/bin/bash
 
-import (
-	"fmt"
-	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-)
+# Exit safely
+set -euo pipefail
 
-func main() {
-	if len(os.Args) != 4 {
-		log.Fatalf("Usage: %s <fastq directory> <AMR-reference> <ref fasta file>", os.Args[0])
-	}
+# -----------------------------
+# Check arguments
+# -----------------------------
+if [ "$#" -ne 3 ]; then
+    echo "Usage: $0 <fastq_directory> <AMR-reference> <threads>"
+    exit 1
+fi
 
-	fastqDir := os.Args[1]
-	amrReference := os.Args[2]
-	refFasta := os.Args[3]
+FASTQ_DIR="$1"
+AMR_REFERENCE="$2"
+THREADS="$3"
 
-	files, err := os.ReadDir(fastqDir)
-	if err != nil {
-		log.Fatal(err)
-	}
+# -----------------------------
+# Check required tools
+# -----------------------------
+command -v bwa >/dev/null 2>&1 || { echo "Error: bwa not found in PATH"; exit 1; }
+command -v pileup.sh >/dev/null 2>&1 || { echo "Error: pileup.sh not found in PATH"; exit 1; }
 
-	for _, file := range files {
-		if strings.Contains(file.Name(), "_R1_") && strings.HasSuffix(file.Name(), ".fastq.gz") {
-			baseName := strings.TrimSuffix(file.Name(), "_R1_001.fastq.gz")
-			r1File := filepath.Join(fastqDir, file.Name())
-			r2File := filepath.Join(fastqDir, fmt.Sprintf("%s_R2_001.fastq.gz", baseName))
-			samFile := fmt.Sprintf("%s.sam", baseName)
-			txtFile := fmt.Sprintf("%s.txt", baseName)
+# -----------------------------
+# Process FASTQ files
+# -----------------------------
+for R1_FILE in "$FASTQ_DIR"/*_R1_001.fastq.gz; do
 
-			// Execute bwa mem
-			cmd := exec.Command("bwa", "mem", amrReference, r1File, r2File)
-			sam, err := os.Create(samFile)
-			if err != nil {
-				log.Printf("Error creating SAM file: %v", err)
-				continue
-			}
-			cmd.Stdout = sam
-			err = cmd.Run()
-			if err != nil {
-				log.Printf("Error running bwa mem: %v", err)
-				continue
-			}
+    [ -e "$R1_FILE" ] || continue
 
-			// Execute pileup.sh
-			cmd = exec.Command("pileup.sh", fmt.Sprintf("in=%s", samFile), fmt.Sprintf("out=%s", txtFile), fmt.Sprintf("ref=%s", refFasta))
-			err = cmd.Run()
-			if err != nil {
-				log.Printf("Error running pileup.sh: %v", err)
-				continue
-			}
-		}
-	}
-}
+    BASENAME=$(basename "$R1_FILE" _R1_001.fastq.gz)
+    R2_FILE="$FASTQ_DIR/${BASENAME}_R2_001.fastq.gz"
+    SAM_FILE="${BASENAME}.sam"
+    TXT_FILE="${BASENAME}.txt"
+    PILEUP_OUTPUT_FILE="${BASENAME}-pileup-output.txt"
 
+    if [ ! -f "$R2_FILE" ]; then
+        echo "Warning: Missing R2 file for $BASENAME. Skipping."
+        continue
+    fi
+
+    echo "====================================="
+    echo "Processing sample: $BASENAME"
+    echo "====================================="
+
+    # -----------------------------
+    # Run bwa mem with threads
+    # -----------------------------
+    echo "Running bwa mem with $THREADS threads..."
+    if ! bwa mem -t "$THREADS" "$AMR_REFERENCE" "$R1_FILE" "$R2_FILE" > "$SAM_FILE"; then
+        echo "Error running bwa mem for $BASENAME"
+        continue
+    fi
+
+    # -----------------------------
+    # Run pileup.sh and capture stdout + stderr
+    # -----------------------------
+    echo "Running pileup.sh..."
+
+    if ! pileup.sh in="$SAM_FILE" out="$TXT_FILE" > "$PILEUP_OUTPUT_FILE" 2>&1; then
+        echo "Error running pileup.sh for $BASENAME"
+        continue
+    fi
+
+    echo "Finished sample: $BASENAME"
+    echo
+
+done
+
+echo "Pipeline completed successfully."
